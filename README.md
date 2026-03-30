@@ -151,6 +151,24 @@ Open the training config, for example, [`omomo_train_new.yaml`](./isaacgym/src/i
    physicalBufferSize: <integer greater than 1>
    ```
 
+### Native G1-to-G1 Teacher Training
+
+For the Holosoma-based `OMOMO_holosoma_G1` retarget path, first convert the raw `.npz` files into the native G1 schema:
+
+```bash
+sh isaacgym/scripts/convert_g1_native_dataset.sh
+```
+
+The authoritative native schema, morphology contract, and current implementation status live in [`isaacgym/src/intermimic/g1_native_spec.py`](./isaacgym/src/intermimic/g1_native_spec.py).
+
+Then launch the native G1 teacher PPO:
+
+```bash
+sh isaacgym/scripts/train_g1_native.sh
+```
+
+This path targets Holosoma's `g1_29dof` URDF and expects the sibling `holosoma` repository to be present at the relative path referenced by [`omomo_g1_native.yaml`](./isaacgym/src/intermimic/data/cfg/omomo_g1_native.yaml).
+
 ### Student Policy Training
 
 

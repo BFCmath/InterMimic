@@ -29,6 +29,7 @@
 from ..env.tasks.intermimic import InterMimic
 from ..env.tasks.intermimic_all import InterMimic_All
 from ..env.tasks.intermimic_g1 import InterMimicG1
+from ..env.tasks.intermimic_g1_native import InterMimicG1Native
 from ..env.tasks.vec_task_wrappers import VecTaskPythonWrapper, VecTaskDAggerWrapper
 
 from isaacgym import rlgpu

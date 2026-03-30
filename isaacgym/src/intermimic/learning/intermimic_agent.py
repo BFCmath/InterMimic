@@ -160,6 +160,52 @@ class InterMimicAgent(common_agent.CommonAgent):
         dist.all_reduce(t, op=dist.ReduceOp.SUM)
         t /= dist.get_world_size()
         return t
+
+    def _log_training_start(self):
+        if self.rank != 0:
+            return
+        print(
+            '[InterMimicAgent] training start: '
+            f'epochs={self.max_epochs} '
+            f'horizon={self.horizon_length} '
+            f'num_actors={self.num_actors} '
+            f'batch_size={self.batch_size} '
+            f'minibatch_size={self.minibatch_size} '
+            f'mini_epochs={self.mini_epochs_num} '
+            f'lr={self.last_lr} '
+            f'mixed_precision={self.mixed_precision}'
+        )
+
+    def _log_epoch_progress(self, epoch_num, train_info, total_time, warmup=False):
+        if self.rank != 0:
+            return
+        global_curr_frames = self.curr_frames * (self.world_size if self.multi_gpu else 1)
+        play_time = max(float(train_info['play_time']), 1e-6)
+        total_epoch_time = max(float(train_info['total_time']), 1e-6)
+        mean_rewards = self._get_mean_rewards()
+        phase = 'warmup' if warmup else 'train'
+        reward_summary = ''
+        reward_keys = (
+            'reward_root_pos',
+            'reward_root_rot',
+            'reward_root_vel',
+            'reward_dof_pos',
+            'reward_dof_vel',
+            'reward_object',
+        )
+        present_rewards = [f'{key}={train_info[key]:.3f}' for key in reward_keys if key in train_info]
+        if present_rewards:
+            reward_summary = ' ' + ' '.join(present_rewards)
+        print(
+            f'[InterMimicAgent] {phase} epoch={epoch_num}/{self.max_epochs} '
+            f'frames={global_curr_frames} '
+            f'total_frames={self.frame} '
+            f'mean_rewards={mean_rewards} '
+            f'fps_step={global_curr_frames / play_time:.1f} '
+            f'fps_total={global_curr_frames / total_epoch_time:.1f} '
+            f'total_time={total_time:.1f}s'
+            f'{reward_summary}'
+        )
     
     def train(self):
         if self.resume_from != 'None':
@@ -184,6 +230,7 @@ class InterMimicAgent(common_agent.CommonAgent):
         self._maybe_init_ddp()
 
         self._init_train()
+        self._log_training_start()
         if self.multi_gpu:
             torch.cuda.set_device(self.local_rank)
             print("====================broadcasting parameters")
@@ -207,6 +254,10 @@ class InterMimicAgent(common_agent.CommonAgent):
             frame = self.frame
             should_exit = False
             if self.epoch_num - self.epoch_num_start < 5:
+                global_curr_frames = self.curr_frames * (self.world_size if self.multi_gpu else 1)
+                if self.rank == 0:
+                    self.frame += global_curr_frames
+                    self._log_epoch_progress(epoch_num, train_info, total_time, warmup=True)
                 continue
             # Log/save only on rank 0
             if self.rank == 0:
@@ -227,6 +278,7 @@ class InterMimicAgent(common_agent.CommonAgent):
                         f"epoch_num:{epoch_num} mean_rewards:{self._get_mean_rewards()} "
                         f"fps step: {fps_step:.1f} fps total: {fps_total:.1f}"
                     )
+                self._log_epoch_progress(epoch_num, train_info, total_time, warmup=False)
 
                 self.writer.add_scalar('performance/total_fps', global_curr_frames / scaled_time, self.frame)
                 self.writer.add_scalar('performance/step_fps',  global_curr_frames / scaled_play_time, self.frame)
@@ -322,6 +374,7 @@ class InterMimicAgent(common_agent.CommonAgent):
 
         epinfos = []
         update_list = self.update_list
+        info_accumulators = {}
 
         for n in range(self.horizon_length):
 
@@ -375,6 +428,12 @@ class InterMimicAgent(common_agent.CommonAgent):
             self.game_rewards.update(self.current_rewards[self.done_indices])
             self.game_lengths.update(self.current_lengths[self.done_indices])
             self.algo_observer.process_infos(infos, self.done_indices)
+            for key, value in infos.items():
+                if key == 'terminate' or not torch.is_tensor(value):
+                    continue
+                if not (value.is_floating_point() or value.dtype == torch.bool):
+                    continue
+                info_accumulators[key] = info_accumulators.get(key, 0.0) + value.float().mean()
 
             not_dones = 1.0 - self.dones.float()
 
@@ -398,6 +457,8 @@ class InterMimicAgent(common_agent.CommonAgent):
         batch_dict = self.experience_buffer.get_transformed_list(a2c_common.swap_and_flatten01, self.tensor_list)
         batch_dict['returns'] = a2c_common.swap_and_flatten01(mb_returns)
         batch_dict['played_frames'] = self.batch_size
+        for key, value in info_accumulators.items():
+            batch_dict[f'info/{key}'] = value / self.horizon_length
 
         return batch_dict
 
@@ -583,7 +644,7 @@ class InterMimicAgent(common_agent.CommonAgent):
 
         # --- zero grads (DDP/AMP-safe) ---
         self.optimizer.zero_grad(set_to_none=True)
-        with torch.cuda.amp.autocast(enabled=self.mixed_precision):
+        with torch.amp.autocast('cuda', enabled=self.mixed_precision):
             res_dict = self.model(batch_dict)
             action_log_probs = res_dict['prev_neglogp']
             values = res_dict['values']
@@ -709,6 +770,14 @@ class InterMimicAgent(common_agent.CommonAgent):
     
     def _record_train_batch_info(self, batch_dict, train_info):
         super()._record_train_batch_info(batch_dict, train_info)
+        for key, value in batch_dict.items():
+            if not key.startswith('info/'):
+                continue
+            info_key = key[5:]
+            if torch.is_tensor(value):
+                train_info[info_key] = float(value.item())
+            else:
+                train_info[info_key] = float(value)
         return
     
     def get_cpu_usage(self):
@@ -744,5 +813,10 @@ class InterMimicAgent(common_agent.CommonAgent):
         self.writer.add_scalar('usage/gpu', self.get_gpu_usage(), frame)
         self.writer.add_scalar('usage/cpu_memory', self.get_cpu_memory_usage(), frame)
         self.writer.add_scalar('usage/gpu_memory', self.get_gpu_memory_usage(), frame)
+        for key, value in train_info.items():
+            if key.startswith('reward_'):
+                self.writer.add_scalar(f'reward_components/{key}', value, frame)
+            elif key.startswith('err_'):
+                self.writer.add_scalar(f'tracking_errors/{key}', value, frame)
 
         return

@@ -219,7 +219,7 @@ class InterMimicAgentDistill(intermimic_agent.InterMimicAgent):
             batch_dict['rnn_states'] = input_dict['rnn_states']
             batch_dict['seq_length'] = self.seq_len
         self.optimizer.zero_grad(set_to_none=True)
-        with torch.cuda.amp.autocast(enabled=self.mixed_precision):
+        with torch.amp.autocast('cuda', enabled=self.mixed_precision):
             res_dict = self.model(batch_dict)
             action_log_probs = res_dict['prev_neglogp']
             values = res_dict['values']

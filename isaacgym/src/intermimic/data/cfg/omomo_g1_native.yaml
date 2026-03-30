@@ -1,0 +1,64 @@
+env:
+  numEnvs: 512
+  envSpacing: 1.5
+  episodeLength: 1000
+  enableDebugVis: False
+  pdControl: True
+  powerScale: 1.0
+  controlFrequencyInv: 2
+  stateInit: "Random"
+  rolloutLength: 180
+  hybridInitProb: 0.5
+  motion_file: InterAct/OMOMO_holosoma_G1_native
+  dataSub: []
+  numObs: 257
+  numDoF: 29
+  numDoFWrist: 0
+  numDoFHand: 0
+  robotType: 'g1_29dof.urdf'
+  objectDensity: 25
+  enableObjectTracking: False
+  requireObjectData: False
+  localRootObs: False
+  rootHeightObs: True
+  keyBodies: ['left_hip_yaw_link', 'left_knee_link', 'left_ankle_roll_link', 'left_foot_contact_point', 'right_hip_yaw_link', 'right_knee_link', 'right_ankle_roll_link', 'right_foot_contact_point', 'torso_link', 'head_link', 'left_shoulder_yaw_link', 'left_elbow_link', 'left_wrist_yaw_link', 'left_rubber_hand', 'right_shoulder_yaw_link', 'right_elbow_link', 'right_wrist_yaw_link', 'right_rubber_hand']
+  keyIndex: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+  contactBodies: ['left_foot_contact_point', 'right_foot_contact_point', 'left_knee_link', 'right_knee_link', 'torso_link', 'left_elbow_link', 'right_elbow_link', 'left_rubber_hand', 'right_rubber_hand']
+  contactIndex: [0, 1, 2, 3, 4, 5, 6, 7, 8]
+  terminationHeight: 0.15
+  enableEarlyTermination: True
+
+  asset:
+    assetRoot: "../holosoma/src/holosoma/holosoma/data/robots/g1"
+
+  plane:
+    staticFriction: 0.9
+    dynamicFriction: 0.9
+    restitution: 0.7
+
+  rewardWeights:
+    rootPos: 4.0
+    rootRot: 2.0
+    rootVel: 0.5
+    dofPos: 2.0
+    dofVel: 0.05
+    objPos: 4.0
+    objRot: 1.0
+    actionRate: 0.01
+
+sim:
+  substeps: 2
+  physx:
+    num_threads: 4
+    solver_type: 1
+    num_position_iterations: 4
+    num_velocity_iterations: 0
+    contact_offset: 0.02
+    rest_offset: 0.0
+    bounce_threshold_velocity: 0.2
+    max_depenetration_velocity: 50.0
+    default_buffer_size_multiplier: 20.0
+
+  flex:
+    num_inner_iterations: 10
+    warm_start: 0.25
