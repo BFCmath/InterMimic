@@ -3,8 +3,10 @@ set -e
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 REPO_ROOT="$(CDPATH= cd -- "${SCRIPT_DIR}/../.." && pwd)"
-DEFAULT_CFG_TRAIN="isaacgym/src/intermimic/data/cfg/train/rlg/omomo_g1_native.yaml"
-DEFAULT_CFG_ENV="isaacgym/src/intermimic/data/cfg/omomo_g1_native.yaml"
+DEFAULT_CFG_ENV="isaacgym/src/intermimic/data/cfg/omomo_g1_native_sub10.yaml"
+DEFAULT_CFG_TRAIN="isaacgym/src/intermimic/data/cfg/train/rlg/omomo_g1_native_sub10.yaml"
+DEFAULT_RUN_NAME="g1_native_sub10"
+DEFAULT_OUTPUT_PATH="output/sub10/"
 
 export PYTHONPATH="$REPO_ROOT/isaacgym/src:$REPO_ROOT:$PYTHONPATH"
 if [ -n "${CONDA_PREFIX:-}" ] && [ -d "${CONDA_PREFIX}/lib" ]; then
@@ -54,7 +56,7 @@ for arg in "$@"; do
     fi
 done
 
-RUN_NAME=""
+RUN_NAME="$DEFAULT_RUN_NAME"
 if [ $# -gt 0 ]; then
     case "$1" in
         -*) ;;
@@ -76,14 +78,12 @@ done
 AUTO_HEADLESS=""
 if [ "$HEADLESS_SET" -eq 0 ] && [ -z "${DISPLAY:-}" ]; then
     AUTO_HEADLESS="--headless"
-    echo "[train_g1_native] DISPLAY is not set; forcing --headless to avoid Isaac Gym viewer segfaults"
+    echo "[train_g1_native_sub10] DISPLAY is not set; forcing --headless to avoid Isaac Gym viewer segfaults"
 fi
 
-CFG_TRAIN_PATH="$DEFAULT_CFG_TRAIN"
-CFG_ENV_PATH="$DEFAULT_CFG_ENV"
-TMP_CFG_TRAIN=""
 TMP_CFG_ENV=""
-RESUME_PATH=""
+TMP_CFG_TRAIN=""
+RESUME_PATH="$REPO_ROOT/$DEFAULT_OUTPUT_PATH$RUN_NAME/nn/$RUN_NAME.pth"
 AUTO_RESUME_ARGS=""
 is_valid_checkpoint() {
     checkpoint_path="$1"
@@ -106,9 +106,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-if [ "$FAKE_REWARD" -eq 1 ] || [ "$HDMI_REWARD" -eq 1 ]; then
-    TMP_CFG_ENV="$(mktemp "${TMPDIR:-/tmp}/omomo_g1_native.env.XXXXXX.yaml")"
-    python - "$REPO_ROOT/$DEFAULT_CFG_ENV" "$TMP_CFG_ENV" "$FAKE_REWARD" "$HDMI_REWARD" <<'PY'
+TMP_CFG_ENV="$(mktemp "${TMPDIR:-/tmp}/omomo_g1_native.sub10.XXXXXX.yaml")"
+python - "$REPO_ROOT/$DEFAULT_CFG_ENV" "$TMP_CFG_ENV" "$FAKE_REWARD" "$HDMI_REWARD" <<'PY'
 import sys
 import yaml
 
@@ -116,22 +115,21 @@ src_path, dst_path, fake_reward, hdmi_reward = sys.argv[1:5]
 with open(src_path, 'r') as f:
     cfg = yaml.safe_load(f)
 
+cfg['env']['dataSub'] = ['sub10']
 cfg['env']['fakeReward'] = bool(int(fake_reward))
 cfg['env']['hdmiReward'] = bool(int(hdmi_reward))
 
 with open(dst_path, 'w') as f:
     yaml.safe_dump(cfg, f, sort_keys=False)
 PY
-    CFG_ENV_PATH="$TMP_CFG_ENV"
-fi
 
-if [ -n "$RUN_NAME" ]; then
-    TMP_CFG_TRAIN="$(mktemp "${TMPDIR:-/tmp}/omomo_g1_native.${RUN_NAME}.XXXXXX.yaml")"
-    python - "$REPO_ROOT/$DEFAULT_CFG_TRAIN" "$TMP_CFG_TRAIN" "$RUN_NAME" <<'PY'
+TMP_CFG_TRAIN="$(mktemp "${TMPDIR:-/tmp}/omomo_g1_native.sub10.${RUN_NAME}.XXXXXX.yaml")"
+python - "$REPO_ROOT/$DEFAULT_CFG_TRAIN" "$TMP_CFG_TRAIN" "$RUN_NAME" "$RESUME_PATH" <<'PY'
 import sys
 import yaml
+from pathlib import Path
 
-src_path, dst_path, run_name = sys.argv[1:4]
+src_path, dst_path, run_name, resume_path = sys.argv[1:5]
 with open(src_path, 'r') as f:
     cfg = yaml.safe_load(f)
 
@@ -139,28 +137,33 @@ cfg['params']['config']['name'] = run_name
 cfg['params']['config']['full_experiment_name'] = run_name
 cfg['params']['load_checkpoint'] = False
 cfg['params']['config']['resume_from'] = 'None'
+resume_checkpoint = Path(resume_path)
+if resume_checkpoint.exists():
+    cfg['params']['load_checkpoint'] = True
+    cfg['params']['load_path'] = str(resume_checkpoint)
+    cfg['params']['config']['resume_from'] = str(resume_checkpoint)
 
 with open(dst_path, 'w') as f:
     yaml.safe_dump(cfg, f, sort_keys=False)
 PY
-    CFG_TRAIN_PATH="$TMP_CFG_TRAIN"
-    echo "[train_g1_native] run_name=$RUN_NAME"
-    echo "[train_g1_native] checkpoint_dir=output/$RUN_NAME/nn"
-    echo "[train_g1_native] fakeReward=$FAKE_REWARD"
-    echo "[train_g1_native] hdmiReward=$HDMI_REWARD"
-    RESUME_PATH="$REPO_ROOT/output/$RUN_NAME/nn/$RUN_NAME.pth"
-    if [ "$CHECKPOINT_SET" -eq 0 ] && is_valid_checkpoint "$RESUME_PATH"; then
-        AUTO_RESUME_ARGS="--checkpoint $RESUME_PATH --resume 1"
-        echo "[train_g1_native] auto_resume=$RESUME_PATH"
-    elif [ "$CHECKPOINT_SET" -eq 0 ] && [ -f "$RESUME_PATH" ]; then
-        echo "[train_g1_native] skip_corrupt_resume=$RESUME_PATH"
-    fi
+
+echo "[train_g1_native_sub10] run_name=$RUN_NAME"
+echo "[train_g1_native_sub10] dataSub=['sub10']"
+echo "[train_g1_native_sub10] fakeReward=$FAKE_REWARD"
+echo "[train_g1_native_sub10] hdmiReward=$HDMI_REWARD"
+echo "[train_g1_native_sub10] checkpoint_dir=$DEFAULT_OUTPUT_PATH$RUN_NAME/nn"
+if [ "$CHECKPOINT_SET" -eq 0 ] && is_valid_checkpoint "$RESUME_PATH"; then
+    AUTO_RESUME_ARGS="--checkpoint $RESUME_PATH --resume 1"
+    echo "[train_g1_native_sub10] auto_resume=$RESUME_PATH"
+elif [ "$CHECKPOINT_SET" -eq 0 ] && [ -f "$RESUME_PATH" ]; then
+    echo "[train_g1_native_sub10] skip_corrupt_resume=$RESUME_PATH"
 fi
 
 python -m intermimic.run \
     --task InterMimicG1Native \
-    --cfg_env "$CFG_ENV_PATH" \
-    --cfg_train "$CFG_TRAIN_PATH" \
+    --cfg_env "$TMP_CFG_ENV" \
+    --cfg_train "$TMP_CFG_TRAIN" \
+    --output_path "$DEFAULT_OUTPUT_PATH" \
     $AUTO_RESUME_ARGS \
     $AUTO_HEADLESS \
     "$@"

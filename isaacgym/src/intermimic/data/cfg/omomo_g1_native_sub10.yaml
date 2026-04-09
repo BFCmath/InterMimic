@@ -20,16 +20,14 @@ env:
   objectDensity: 25
   enableObjectTracking: False
   requireObjectData: False
-  fakeReward: False
-  hdmiReward: False
   localRootObs: False
   rootHeightObs: True
   keyBodies: ['left_hip_yaw_link', 'left_knee_link', 'left_ankle_roll_link', 'left_foot_contact_point', 'right_hip_yaw_link', 'right_knee_link', 'right_ankle_roll_link', 'right_foot_contact_point', 'torso_link', 'head_link', 'left_shoulder_yaw_link', 'left_elbow_link', 'left_wrist_yaw_link', 'left_rubber_hand', 'right_shoulder_yaw_link', 'right_elbow_link', 'right_wrist_yaw_link', 'right_rubber_hand']
   keyIndex: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
   contactBodies: ['left_foot_contact_point', 'right_foot_contact_point', 'left_knee_link', 'right_knee_link', 'torso_link', 'left_elbow_link', 'right_elbow_link', 'left_rubber_hand', 'right_rubber_hand']
   contactIndex: [0, 1, 2, 3, 4, 5, 6, 7, 8]
-  trackedBodyNames: ['pelvis', 'torso_link', 'left_knee_link', 'right_knee_link', 'left_ankle_roll_link', 'right_ankle_roll_link', 'left_shoulder_roll_link', 'right_shoulder_roll_link', 'left_elbow_link', 'right_elbow_link']
-  trackedBodyHumanJointIndices: [0, 9, 2, 6, 3, 7, 15, 34, 16, 35]
+  trackedBodyNames: ['pelvis', 'left_knee_link', 'right_knee_link', 'left_ankle_roll_link', 'right_ankle_roll_link', 'left_shoulder_roll_link', 'right_shoulder_roll_link']
+  trackedBodyHumanJointIndices: [0, 2, 6, 3, 7, 15, 34]
   terminationHeight: 0.15
   enableEarlyTermination: True
 
@@ -47,6 +45,8 @@ env:
     rootVel: 0.15
     dofPos: 0.25
     dofVel: 0.05
+    sparseBodyPos: 0.15
+    balance: 0.0
     objPos: 0.0
     objRot: 0.0
     actionRate: 0.04
@@ -59,25 +59,10 @@ env:
     rootVel: 1.0
     dofPos: 2.0
     dofVel: 0.2
+    sparseBodyPos: 6.0
+    balance: 4.0
     objPos: 4.0
     objRot: 1.0
-
-  fakeRewardConfig:
-    sparseBodyPosWeight: 0.15
-    sparseBodyPosScale: 6.0
-    balanceWeight: 0.05
-    balanceScale: 4.0
-
-  hdmiRewardConfig:
-    jointVelL2Weight: 0.0005
-    locoSurvivalWeight: 1.0
-    feetSlipWeight: 0.5
-    feetSlipTolerance: 0.0
-    feetContactForceThreshold: 1.0
-    feetAirTimeWeight: 5.0
-    feetAirTimeThreshold: 0.5
-    feetSurvivalWeight: 1.0
-    footBodyNames: ['left_ankle_roll_link', 'right_ankle_roll_link']
 
   resetNoise:
     rootPos: [0.02, 0.02, 0.01]
@@ -90,12 +75,17 @@ env:
   imitationTermination:
     rootPosThreshold: 0.60
     rootRotThreshold: 1.20
+    sparseBodyPosThreshold: 0.35
     persistenceSteps: 4
     jointLimitMargin: 0.05
 
+  balanceReward:
+    bodyNames: ['left_shoulder_roll_link', 'right_shoulder_roll_link', 'right_hip_yaw_link', 'left_hip_yaw_link']
+    maxArea: 0.25
+
 sim:
   substeps: 2
-  gravity: [0.0, 0.0, -9.81]
+  gravity: [0.0, 0.0, -5.81]
   physx:
     num_threads: 4
     solver_type: 1

@@ -191,6 +191,38 @@ Recommended scale-up pattern:
 2. `--num_envs 128 --minibatch_size 4096`
 3. default `512`
 
+## 6.5 Record A Checkpoint To MP4
+
+The fork now has a native validation path that mirrors the working main-repo flow:
+
+1. load a saved `InterMimicG1Native` checkpoint in Isaac Gym
+2. force one chosen native G1 clip
+3. dump the rollout as MuJoCo-style `qpos`
+4. render that dump to `.mp4` with headless MuJoCo in the `hdmi` env
+
+Run this from the same `intermimic-gym` shell used for training:
+
+```bash
+sh isaacgym/scripts/record_g1_native.sh \
+  --checkpoint output/fork_1/nn/fork_1.pth \
+  --reference_motion InterAct/OMOMO_holosoma_G1_native/sub3_largebox_003_original.npz \
+  --output output/fork_1/sub3_largebox_003.mp4
+```
+
+Important notes:
+
+- `--reference_motion` can be either a full native `.npz` path or just a sequence name such as `sub3_largebox_003_original`
+- if `--max_steps` is omitted, the recorder uses the chosen clip length automatically
+- the rollout dump is also saved next to the video as `output/fork_1/sub3_largebox_003.npz`
+- the final render subprocess uses conda env `hdmi` by default, because that is the working OSMesa MuJoCo environment on this host
+
+If the `hdmi` env is not visible from your current shell, activate conda by path first:
+
+```bash
+source /pfss/mlde/workspaces/mlde_wsp_IAS_SAMMerge/miniconda3/etc/profile.d/conda.sh
+conda activate /pfss/mlde/workspaces/mlde_wsp_IAS_SAMMerge/miniconda3/envs/hdmi
+```
+
 ## 7. What The Launcher Sets Up
 
 The launcher script:

@@ -77,6 +77,7 @@ class G1NativeMotionDataset:
         'object_lin_vel',
         'object_ang_vel',
         'object_mask',
+        'source_human_joints',
     )
 
     def __init__(self, motion_root: str, *, allowed_subjects: Sequence[str] | None = None,
@@ -198,6 +199,17 @@ class G1NativeMotionDataset:
                 object_ang_vel = torch.zeros((root_pos.shape[0], 3), dtype=torch.float32)
                 object_mask = torch.zeros((root_pos.shape[0], 1), dtype=torch.float32)
 
+            if 'source_human_joints' in data:
+                source_human_joints = torch.from_numpy(data['source_human_joints']).to(torch.float32)
+                if source_human_joints.ndim != 3 or source_human_joints.shape[-1] != 3:
+                    raise ValueError(
+                        f'source_human_joints in {path} must have shape [T, J, 3], got {tuple(source_human_joints.shape)}'
+                    )
+                self._validate_frame_count(path, root_pos.shape[0], source_human_joints=source_human_joints)
+                source_human_joints = source_human_joints.view(source_human_joints.shape[0], -1)
+            else:
+                source_human_joints = torch.zeros((root_pos.shape[0], 52 * 3), dtype=torch.float32)
+
         return {
             'root_pos': root_pos,
             'root_rot': root_rot,
@@ -210,6 +222,7 @@ class G1NativeMotionDataset:
             'object_lin_vel': object_lin_vel,
             'object_ang_vel': object_ang_vel,
             'object_mask': object_mask,
+            'source_human_joints': source_human_joints,
         }
 
     def get_state(self, sequence_ids: torch.Tensor, frame_ids: torch.Tensor) -> dict[str, torch.Tensor]:

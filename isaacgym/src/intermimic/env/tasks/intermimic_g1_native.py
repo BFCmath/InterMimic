@@ -16,6 +16,33 @@ from .humanoid_g1 import Humanoid_G1
 
 
 class InterMimicG1Native(Humanoid_G1):
+    DEFAULT_SPARSE_BODY_TO_HUMAN_JOINT = {
+        'pelvis': 0,
+        'torso_link': 9,
+        'left_knee_link': 2,
+        'right_knee_link': 6,
+        'left_ankle_pitch_link': 3,
+        'left_ankle_roll_link': 3,
+        'left_foot_contact_point': 10,
+        'right_ankle_pitch_link': 7,
+        'right_ankle_roll_link': 7,
+        'right_foot_contact_point': 11,
+        'left_shoulder_pitch_link': 15,
+        'left_shoulder_roll_link': 15,
+        'left_shoulder_yaw_link': 15,
+        'left_elbow_link': 16,
+        'right_shoulder_pitch_link': 34,
+        'right_shoulder_roll_link': 34,
+        'right_shoulder_yaw_link': 34,
+        'right_elbow_link': 35,
+    }
+    DEFAULT_BALANCE_BODY_NAMES = (
+        'left_shoulder_roll_link',
+        'right_shoulder_roll_link',
+        'right_hip_yaw_link',
+        'left_hip_yaw_link',
+    )
+
     class StateInit(Enum):
         Default = 0
         Start = 1
@@ -28,12 +55,35 @@ class InterMimicG1Native(Humanoid_G1):
         self._hybrid_init_prob = cfg['env'].get('hybridInitProb', 0.5)
         self.motion_file = cfg['env']['motion_file']
         self.reward_weights = cfg['env']['rewardWeights']
+        self.reward_tracking_scales = cfg['env'].get('rewardTrackingScales', {})
         self.rollout_length = cfg['env']['rolloutLength']
         self.enable_object_tracking = bool(cfg['env'].get('enableObjectTracking', False))
         self.require_object_data = bool(cfg['env'].get('requireObjectData', False))
+        self.enable_fake_reward = bool(cfg['env'].get('fakeReward', False))
+        self.enable_hdmi_reward = bool(cfg['env'].get('hdmiReward', False))
         self.robot_type = cfg['env']['robotType']
         self.object_density = cfg['env']['objectDensity']
         self.data_sub = cfg['env'].get('dataSub', [])
+        self.reset_noise = cfg['env'].get('resetNoise', {})
+        self.termination_cfg = cfg['env'].get('imitationTermination', {})
+        self.action_scale_mult = float(cfg['env'].get('actionScaleMult', 1.0))
+        self.fake_reward_cfg = cfg['env'].get('fakeRewardConfig', {})
+        self.hdmi_reward_cfg = cfg['env'].get('hdmiRewardConfig', {})
+        balance_cfg = cfg['env'].get('balanceReward', {})
+        self._balance_body_names = tuple(balance_cfg.get('bodyNames', self.DEFAULT_BALANCE_BODY_NAMES))
+        if len(self._balance_body_names) != 4:
+            raise ValueError('balanceReward.bodyNames must contain exactly 4 rigid body names')
+        self._balance_max_area = float(balance_cfg.get('maxArea', 0.25))
+        if self._balance_max_area <= 0.0:
+            raise ValueError('balanceReward.maxArea must be > 0')
+        tracked_body_names = cfg['env'].get('trackedBodyNames', [])
+        proxy_joint_indices = cfg['env'].get('trackedBodyHumanJointIndices')
+        self._tracked_body_names = tuple(tracked_body_names)
+        if proxy_joint_indices is None:
+            proxy_joint_indices = [self.DEFAULT_SPARSE_BODY_TO_HUMAN_JOINT[name] for name in self._tracked_body_names]
+        if len(proxy_joint_indices) != len(self._tracked_body_names):
+            raise ValueError('trackedBodyHumanJointIndices must align with trackedBodyNames')
+        self._tracked_body_human_joint_indices = tuple(int(idx) for idx in proxy_joint_indices)
         self._hidden_object_height = -10.0
         self.ref_hoi_obs_size = g1_native_spec.native_observation_size()
 
@@ -73,9 +123,19 @@ class InterMimicG1Native(Humanoid_G1):
 
         self.dataset_id = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         self._track_reset_mask = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self._drift_violation_counts = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         self.prev_actions = torch.zeros((self.num_envs, self.num_actions), device=self.device, dtype=torch.float32)
         self._curr_ref_state = self.motion_lib.get_state(torch.zeros(self.num_envs, dtype=torch.long, device=self.device),
                                                          torch.zeros(self.num_envs, dtype=torch.long, device=self.device))
+        self._tracked_body_ids = self._build_tracked_body_ids_tensor()
+        self._balance_body_ids = self._build_balance_body_ids_tensor()
+        self._foot_body_names = tuple(self.hdmi_reward_cfg.get('footBodyNames', ('left_ankle_roll_link', 'right_ankle_roll_link')))
+        self._foot_body_ids = self._build_body_ids_tensor(self._foot_body_names, 'HDMI foot')
+        self._tracked_body_human_joint_ids = to_torch(self._tracked_body_human_joint_indices, device=self.device, dtype=torch.long)
+        self._foot_in_contact = torch.zeros((self.num_envs, len(self._foot_body_names)), device=self.device, dtype=torch.bool)
+        self._foot_air_time = torch.zeros((self.num_envs, len(self._foot_body_names)), device=self.device, dtype=torch.float32)
+        if self._pd_control and self.action_scale_mult != 1.0:
+            self._pd_action_scale *= self.action_scale_mult
         self._build_target_tensors()
         self._log_native_dataset_summary()
 
@@ -214,6 +274,37 @@ class InterMimicG1Native(Humanoid_G1):
         self._target_states = self._root_states.view(self.num_envs, num_actors, self._root_states.shape[-1])[..., 1, :]
         self._tar_actor_ids = to_torch(num_actors * np.arange(self.num_envs), device=self.device, dtype=torch.int32) + 1
 
+    def _build_tracked_body_ids_tensor(self):
+        if not self._tracked_body_names:
+            return torch.zeros(0, device=self.device, dtype=torch.long)
+        return self._build_body_ids_tensor(self._tracked_body_names, 'tracked')
+
+    def _build_balance_body_ids_tensor(self):
+        return self._build_body_ids_tensor(self._balance_body_names, 'balance')
+
+    def _build_body_ids_tensor(self, body_names, label):
+        if not body_names:
+            return torch.zeros(0, device=self.device, dtype=torch.long)
+        env_ptr = self.envs[0]
+        actor_handle = self.humanoid_handles[0]
+        body_ids = []
+        for body_name in body_names:
+            body_id = self.gym.find_actor_rigid_body_handle(env_ptr, actor_handle, body_name)
+            if body_id == -1:
+                raise ValueError(f'Unknown {label} body for native G1 task: {body_name}')
+            body_ids.append(body_id)
+        return to_torch(body_ids, device=self.device, dtype=torch.long)
+
+    def _compute_balance_area_xy(self, body_pos):
+        # body_pos shape: [num_envs, 4, 3]
+        xy = body_pos[..., :2]
+        x = xy[..., 0]
+        y = xy[..., 1]
+        x_next = torch.roll(x, shifts=-1, dims=1)
+        y_next = torch.roll(y, shifts=-1, dims=1)
+        signed_area = 0.5 * torch.sum(x * y_next - y * x_next, dim=1)
+        return torch.abs(signed_area)
+
     def _sample_motion_ids(self, env_ids: torch.Tensor) -> torch.Tensor:
         if not self._has_any_object:
             return torch.randint(self.num_motions, (env_ids.shape[0],), device=self.device, dtype=torch.long)
@@ -271,6 +362,34 @@ class InterMimicG1Native(Humanoid_G1):
         self._dof_pos[env_ids] = dof_pos
         self._dof_vel[env_ids] = dof_vel
 
+    def _sample_uniform_noise(self, shape, magnitude, dtype):
+        if magnitude <= 0.0:
+            return torch.zeros(shape, device=self.device, dtype=dtype)
+        return (2.0 * torch.rand(shape, device=self.device, dtype=dtype) - 1.0) * magnitude
+
+    def _apply_reset_noise(self, ref):
+        noisy_root_pos = ref['root_pos'].clone()
+        root_pos_noise = self.reset_noise.get('rootPos', [0.0, 0.0, 0.0])
+        noisy_root_pos[:, 0] += self._sample_uniform_noise((ref['root_pos'].shape[0],), float(root_pos_noise[0]), ref['root_pos'].dtype)
+        noisy_root_pos[:, 1] += self._sample_uniform_noise((ref['root_pos'].shape[0],), float(root_pos_noise[1]), ref['root_pos'].dtype)
+        noisy_root_pos[:, 2] += self._sample_uniform_noise((ref['root_pos'].shape[0],), float(root_pos_noise[2]), ref['root_pos'].dtype)
+
+        noisy_root_rot = ref['root_rot'].clone()
+        root_rot_noise = self.reset_noise.get('rootRot', [0.0, 0.0, 0.0])
+        roll = self._sample_uniform_noise((ref['root_rot'].shape[0],), float(root_rot_noise[0]), ref['root_rot'].dtype)
+        pitch = self._sample_uniform_noise((ref['root_rot'].shape[0],), float(root_rot_noise[1]), ref['root_rot'].dtype)
+        yaw = self._sample_uniform_noise((ref['root_rot'].shape[0],), float(root_rot_noise[2]), ref['root_rot'].dtype)
+        root_rot_delta = quat_from_euler_xyz(roll, pitch, yaw)
+        noisy_root_rot = g1_native_spec.normalize_quat(quat_mul(root_rot_delta, noisy_root_rot))
+
+        noisy_dof_pos = ref['dof_pos'] + self._sample_uniform_noise(ref['dof_pos'].shape, float(self.reset_noise.get('dofPos', 0.0)), ref['dof_pos'].dtype)
+        noisy_dof_pos = torch.clamp(noisy_dof_pos, self.dof_limits_lower.unsqueeze(0), self.dof_limits_upper.unsqueeze(0))
+
+        noisy_root_lin_vel = ref['root_lin_vel'] + self._sample_uniform_noise(ref['root_lin_vel'].shape, float(self.reset_noise.get('rootLinVel', 0.0)), ref['root_lin_vel'].dtype)
+        noisy_root_ang_vel = ref['root_ang_vel'] + self._sample_uniform_noise(ref['root_ang_vel'].shape, float(self.reset_noise.get('rootAngVel', 0.0)), ref['root_ang_vel'].dtype)
+        noisy_dof_vel = ref['dof_vel'] + self._sample_uniform_noise(ref['dof_vel'].shape, float(self.reset_noise.get('dofVel', 0.0)), ref['dof_vel'].dtype)
+        return noisy_root_pos, noisy_root_rot, noisy_dof_pos, noisy_root_lin_vel, noisy_root_ang_vel, noisy_dof_vel
+
     def _reset_actors(self, env_ids):
         sequence_ids = self._sample_motion_ids(env_ids)
         frame_ids = self._sample_start_frames(sequence_ids, env_ids)
@@ -281,14 +400,18 @@ class InterMimicG1Native(Humanoid_G1):
         self.start_times[env_ids] = frame_ids
         self.prev_actions[env_ids] = 0.0
         self._track_reset_mask[env_ids] = False
+        self._drift_violation_counts[env_ids] = 0
+        self._foot_in_contact[env_ids] = False
+        self._foot_air_time[env_ids] = 0.0
+        noisy_root_pos, noisy_root_rot, noisy_dof_pos, noisy_root_lin_vel, noisy_root_ang_vel, noisy_dof_vel = self._apply_reset_noise(ref)
         self._set_env_state(
             env_ids,
-            ref['root_pos'],
-            ref['root_rot'],
-            ref['dof_pos'],
-            ref['root_lin_vel'],
-            ref['root_ang_vel'],
-            ref['dof_vel'],
+            noisy_root_pos,
+            noisy_root_rot,
+            noisy_dof_pos,
+            noisy_root_lin_vel,
+            noisy_root_ang_vel,
+            noisy_dof_vel,
         )
         self._reset_target(env_ids)
 
@@ -336,6 +459,10 @@ class InterMimicG1Native(Humanoid_G1):
             'object_lin_vel': object_states[:, 7:10],
             'object_ang_vel': object_states[:, 10:13],
             'object_mask': self.motion_lib.has_object_sequence[self.data_id if env_ids is None else self.data_id[env_ids]].float().unsqueeze(-1),
+            'tracked_body_pos': self._rigid_body_pos[:, self._tracked_body_ids, :] if env_ids is None else self._rigid_body_pos[env_ids][:, self._tracked_body_ids, :],
+            'balance_body_pos': self._rigid_body_pos[:, self._balance_body_ids, :] if env_ids is None else self._rigid_body_pos[env_ids][:, self._balance_body_ids, :],
+            'foot_body_vel': self._rigid_body_vel[:, self._foot_body_ids, :] if env_ids is None else self._rigid_body_vel[env_ids][:, self._foot_body_ids, :],
+            'foot_contact_forces': self._contact_forces[:, self._foot_body_ids, :] if env_ids is None else self._contact_forces[env_ids][:, self._foot_body_ids, :],
         }
 
     def _compute_hoi_observations(self, env_ids=None):
@@ -414,6 +541,7 @@ class InterMimicG1Native(Humanoid_G1):
         current_state = self._gather_current_state()
         ref_state = self._curr_ref_state
         weights = self.reward_weights
+        scales = self.reward_tracking_scales
 
         root_pos_err = torch.sum((ref_state['root_pos'] - current_state['root_pos']) ** 2, dim=-1)
         root_rot_diff = torch_utils.quat_mul_norm(torch_utils.quat_inverse(ref_state['root_rot']), current_state['root_rot'])
@@ -424,31 +552,105 @@ class InterMimicG1Native(Humanoid_G1):
         dof_vel_err = torch.mean((ref_state['dof_vel'] - current_state['dof_vel']) ** 2, dim=-1)
         action_rate_err = torch.mean((actions - self.prev_actions) ** 2, dim=-1)
         root_vel_track_err = root_vel_err + root_ang_vel_err
+        sparse_body_err = torch.zeros_like(root_pos_err)
+        balance_area_xy = torch.zeros_like(root_pos_err)
+        balance_area_norm = torch.zeros_like(root_pos_err)
 
-        reward_root_pos = torch.exp(-weights['rootPos'] * root_pos_err)
-        reward_root_rot = torch.exp(-weights['rootRot'] * root_rot_angle.abs())
-        reward_root_vel = torch.exp(-weights['rootVel'] * root_vel_track_err)
-        reward_dof_pos = torch.exp(-weights['dofPos'] * dof_pos_err)
-        reward_dof_vel = torch.exp(-weights['dofVel'] * dof_vel_err)
-        reward_action_rate = torch.exp(-weights['actionRate'] * action_rate_err)
+        lower_soft = self.dof_limits_lower.unsqueeze(0) + float(self.termination_cfg.get('jointLimitMargin', 0.05))
+        upper_soft = self.dof_limits_upper.unsqueeze(0) - float(self.termination_cfg.get('jointLimitMargin', 0.05))
+        joint_limit_violation = torch.relu(lower_soft - current_state['dof_pos']) + torch.relu(current_state['dof_pos'] - upper_soft)
+        joint_limit_err = torch.mean(joint_limit_violation ** 2, dim=-1)
+
+        reward_root_pos = torch.exp(-scales['rootPos'] * root_pos_err)
+        reward_root_rot = torch.exp(-scales['rootRot'] * root_rot_angle.abs())
+        reward_root_vel = torch.exp(-scales['rootVel'] * root_vel_track_err)
+        reward_dof_pos = torch.exp(-scales['dofPos'] * dof_pos_err)
+        reward_dof_vel = torch.exp(-scales['dofVel'] * dof_vel_err)
+        reward_sparse_body_pos = torch.zeros_like(root_pos_err)
+        reward_balance = torch.zeros_like(root_pos_err)
+        reward_hdmi_joint_vel_l2 = torch.zeros_like(root_pos_err)
+        reward_hdmi_loco_survival = torch.zeros_like(root_pos_err)
+        reward_hdmi_feet_slip = torch.zeros_like(root_pos_err)
+        reward_hdmi_feet_air_time = torch.zeros_like(root_pos_err)
+        reward_hdmi_feet_survival = torch.zeros_like(root_pos_err)
+
+        if self.enable_fake_reward:
+            ref_human_joints = ref_state['source_human_joints'].view(ref_state['source_human_joints'].shape[0], -1, 3)
+            ref_sparse_body_pos = ref_human_joints[:, self._tracked_body_human_joint_ids, :]
+            ref_sparse_root = ref_human_joints[:, 0:1, :]
+            ref_sparse_body_rel = ref_sparse_body_pos - ref_sparse_root
+            cur_sparse_body_rel = current_state['tracked_body_pos'] - current_state['root_pos'].unsqueeze(1)
+            sparse_body_err = torch.mean((ref_sparse_body_rel - cur_sparse_body_rel) ** 2, dim=(1, 2))
+            reward_sparse_body_pos = torch.exp(-float(self.fake_reward_cfg.get('sparseBodyPosScale', 6.0)) * sparse_body_err)
+
+            balance_area_xy = self._compute_balance_area_xy(current_state['balance_body_pos'])
+            balance_area_norm = balance_area_xy / self._balance_max_area
+            reward_balance = torch.exp(-float(self.fake_reward_cfg.get('balanceScale', 4.0)) * balance_area_norm)
+
+        if self.enable_hdmi_reward:
+            reward_hdmi_joint_vel_l2 = -torch.sum(torch.clamp(current_state['dof_vel'] ** 2, max=5.0), dim=-1)
+            reward_hdmi_loco_survival = torch.ones_like(root_pos_err)
+
+            contact_force_threshold = float(self.hdmi_reward_cfg.get('feetContactForceThreshold', 1.0))
+            feet_slip_tolerance = float(self.hdmi_reward_cfg.get('feetSlipTolerance', 0.0))
+            foot_contact_force = torch.norm(current_state['foot_contact_forces'], dim=-1)
+            foot_in_contact = foot_contact_force > contact_force_threshold
+            foot_xy_speed = torch.norm(current_state['foot_body_vel'][..., :2], dim=-1)
+            reward_hdmi_feet_slip = -(foot_in_contact.float() * torch.clamp(foot_xy_speed - feet_slip_tolerance, min=0.0, max=1.0)).sum(dim=-1)
+
+            first_contact = foot_in_contact & (~self._foot_in_contact)
+            reward_hdmi_feet_air_time = torch.sum(
+                torch.clamp(self._foot_air_time - float(self.hdmi_reward_cfg.get('feetAirTimeThreshold', 0.5)), max=0.0)
+                * first_contact.float(),
+                dim=-1,
+            )
+            reward_hdmi_feet_survival = torch.ones_like(root_pos_err)
+
+            self._foot_air_time = torch.where(
+                foot_in_contact,
+                torch.zeros_like(self._foot_air_time),
+                self._foot_air_time + self.dt,
+            )
+            self._foot_in_contact = foot_in_contact
+
+        root_pos_rmse = root_pos_err.sqrt()
+        drift_violation = (
+            (root_pos_rmse > float(self.termination_cfg['rootPosThreshold']))
+            | (root_rot_angle.abs() > float(self.termination_cfg['rootRotThreshold']))
+        )
+        self._drift_violation_counts = torch.where(
+            drift_violation,
+            self._drift_violation_counts + 1,
+            torch.zeros_like(self._drift_violation_counts),
+        )
 
         reward = (
-            reward_root_pos
-            * reward_root_rot
-            * reward_root_vel
-            * reward_dof_pos
-            * reward_dof_vel
-            * reward_action_rate
+            weights['rootPos'] * reward_root_pos
+            + weights['rootRot'] * reward_root_rot
+            + weights['rootVel'] * reward_root_vel
+            + weights['dofPos'] * reward_dof_pos
+            + weights['dofVel'] * reward_dof_vel
+            + float(self.fake_reward_cfg.get('sparseBodyPosWeight', 0.15)) * reward_sparse_body_pos
+            + float(self.fake_reward_cfg.get('balanceWeight', 0.05)) * reward_balance
+            + float(self.hdmi_reward_cfg.get('jointVelL2Weight', 0.0005)) * reward_hdmi_joint_vel_l2
+            + float(self.hdmi_reward_cfg.get('locoSurvivalWeight', 1.0)) * reward_hdmi_loco_survival
+            + float(self.hdmi_reward_cfg.get('feetSlipWeight', 0.5)) * reward_hdmi_feet_slip
+            + float(self.hdmi_reward_cfg.get('feetAirTimeWeight', 5.0)) * reward_hdmi_feet_air_time
+            + float(self.hdmi_reward_cfg.get('feetSurvivalWeight', 1.0)) * reward_hdmi_feet_survival
+            - weights['actionRate'] * action_rate_err
+            - weights.get('jointLimit', 0.0) * joint_limit_err
+            - weights.get('termination', 0.0) * drift_violation.float()
         )
+        reward = torch.clamp(reward, min=0.0)
 
         if self.enable_object_tracking:
             object_mask = ref_state['object_mask'].squeeze(-1)
             object_pos_err = torch.sum((ref_state['object_pos'] - current_state['object_pos']) ** 2, dim=-1)
             object_rot_diff = torch_utils.quat_mul_norm(torch_utils.quat_inverse(ref_state['object_rot']), current_state['object_rot'])
             object_rot_angle, _ = torch_utils.quat_to_angle_axis(object_rot_diff)
-            object_reward = torch.exp(-weights['objPos'] * object_pos_err) * torch.exp(-weights['objRot'] * object_rot_angle.abs())
-            reward_object = torch.where(object_mask > 0.5, object_reward, torch.ones_like(object_reward))
-            reward = reward * reward_object
+            object_reward = torch.exp(-scales['objPos'] * object_pos_err) * torch.exp(-scales['objRot'] * object_rot_angle.abs())
+            reward_object = torch.where(object_mask > 0.5, object_reward, torch.zeros_like(object_reward))
+            reward = reward + weights.get('objPos', 0.0) * reward_object
             object_reset = torch.logical_and(object_mask > 0.5, object_pos_err.sqrt() > g1_native_spec.RESET_THRESHOLDS['object_pos_l2'])
             object_pos_rmse = torch.where(object_mask > 0.5, object_pos_err.sqrt(), torch.zeros_like(object_pos_err))
         else:
@@ -462,19 +664,28 @@ class InterMimicG1Native(Humanoid_G1):
         self.extras['reward_root_vel'] = reward_root_vel
         self.extras['reward_dof_pos'] = reward_dof_pos
         self.extras['reward_dof_vel'] = reward_dof_vel
-        self.extras['reward_action_rate'] = reward_action_rate
+        self.extras['reward_sparse_body_pos'] = reward_sparse_body_pos
+        self.extras['reward_balance'] = reward_balance
+        self.extras['reward_hdmi_joint_vel_l2'] = reward_hdmi_joint_vel_l2
+        self.extras['reward_hdmi_loco_survival'] = reward_hdmi_loco_survival
+        self.extras['reward_hdmi_feet_slip'] = reward_hdmi_feet_slip
+        self.extras['reward_hdmi_feet_air_time'] = reward_hdmi_feet_air_time
+        self.extras['reward_hdmi_feet_survival'] = reward_hdmi_feet_survival
         self.extras['reward_object'] = reward_object
-        self.extras['err_root_pos_rmse'] = root_pos_err.sqrt()
+        self.extras['err_root_pos_rmse'] = root_pos_rmse
         self.extras['err_root_rot_angle'] = root_rot_angle.abs()
         self.extras['err_root_vel_mse'] = root_vel_track_err
         self.extras['err_dof_pos_rmse'] = torch.sqrt(dof_pos_err)
         self.extras['err_dof_vel_mse'] = dof_vel_err
+        self.extras['err_sparse_body_pos_rmse'] = torch.sqrt(sparse_body_err)
+        self.extras['err_balance_area_xy'] = balance_area_xy
+        self.extras['err_balance_area_norm'] = balance_area_norm
         self.extras['err_action_rate_mse'] = action_rate_err
+        self.extras['err_joint_limit_mse'] = joint_limit_err
         self.extras['err_object_pos_rmse'] = object_pos_rmse
+        self.extras['drift_violation_count'] = self._drift_violation_counts.float()
         self._track_reset_mask = (
-            (root_pos_err.sqrt() > g1_native_spec.RESET_THRESHOLDS['root_pos_l2'])
-            | (root_rot_angle.abs() > g1_native_spec.RESET_THRESHOLDS['root_rot_angle'])
-            | (torch.sqrt(dof_pos_err) > g1_native_spec.RESET_THRESHOLDS['dof_rmse'])
+            (self._drift_violation_counts >= int(self.termination_cfg['persistenceSteps']))
             | object_reset
         )
         self.prev_actions[:] = actions

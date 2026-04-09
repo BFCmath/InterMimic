@@ -49,10 +49,10 @@ params:
     normalize_advantage: True
     gamma: 0.99
     tau: 0.95
-    learning_rate: 1e-5
+    learning_rate: 5e-5
     lr_schedule: constant
     score_to_win: 20000
-    max_epochs: 50000
+    max_epochs: 25000
     save_best_after: 250
     save_frequency: 250
     print_stats: True
@@ -61,8 +61,8 @@ params:
     truncate_grads: False
     ppo: True
     e_clip: 0.15
-    horizon_length: 24
-    minibatch_size: 12288
+    horizon_length: 36
+    minibatch_size: 3072
     mini_epochs: 4
     critic_coef: 5
     clip_value: False

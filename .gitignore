@@ -1,0 +1,10 @@
+# Python cache
+__pycache__/
+
+# TensorBoard event files
+events.out.tfevents*
+
+# Specific directory
+InterAct/OMOMO_holosoma_G1/
+
+*.pth

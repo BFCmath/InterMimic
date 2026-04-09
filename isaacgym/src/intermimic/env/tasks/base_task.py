@@ -118,9 +118,12 @@ class BaseTask():
     def set_sim_params_up_axis(self, sim_params, axis):
         if axis == 'z':
             sim_params.up_axis = gymapi.UP_AXIS_Z
-            sim_params.gravity.x = 0
-            sim_params.gravity.y = 0
-            sim_params.gravity.z = -9.81
+            gravity = self.cfg.get("sim", {}).get("gravity", [0.0, 0.0, -9.81])
+            if len(gravity) != 3:
+                raise ValueError("sim.gravity must be a 3-element list: [x, y, z]")
+            sim_params.gravity.x = float(gravity[0])
+            sim_params.gravity.y = float(gravity[1])
+            sim_params.gravity.z = float(gravity[2])
             return 2
         return 1
 
